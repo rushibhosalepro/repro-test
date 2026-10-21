@@ -29,6 +29,16 @@ const PRODUCTS: Product[] = [
 ];
 const COUPONS: Record<string, number> = { SAVE10: 0.1 };
 
+// Units left per product; the shop stops selling a product at 0.
+const STOCK: Record<string, { count: number }> = {
+  shoes: { count: 12 },
+  tee: { count: 40 },
+  socks: { count: 100 },
+  cap: { count: 25 },
+  bottle: { count: 30 },
+  glasses: { count: 8 },
+};
+
 let sessions = new Map<string, Session>();
 let nextOrderId = 1001;
 
@@ -74,6 +84,7 @@ async function handle(req: Request, s: Session): Promise<Response> {
   if (route === "POST /api/cart") {
     const { productId } = (await req.json()) as { productId: string };
     if (!PRODUCTS.some((p) => p.id === productId)) return json({ error: "unknown product" }, 404);
+    if (STOCK[productId].count === 0) return json({ error: "Out of stock" }, 409);
     const line = s.cart.find((l) => l.productId === productId);
     if (line) line.qty += 1;
     else s.cart.push({ productId, qty: 1 });
