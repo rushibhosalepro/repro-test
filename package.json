@@ -1,0 +1,11 @@
+{
+  "name": "shoplite",
+  "version": "1.0.0",
+  "description": "A tiny online shop.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "bun server.ts",
+    "start": "bun server.ts"
+  }
+}

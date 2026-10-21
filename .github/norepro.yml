@@ -1,0 +1,15 @@
+# Tells No Repro about this app. Optional, but it helps the agent match reports to pages.
+app:
+  name: ShopLite
+  description: A small online shop. Browse and search products, add them to a cart, apply a coupon, place an order.
+  start: bun run dev
+  baseUrl: http://localhost:3000
+  ready: /health
+  reset: POST /__reset
+  pages:
+    - path: /
+      description: Product list with a search box
+    - path: /cart
+      description: Cart with quantity controls, coupon field, totals and the Place Order button
+    - path: /orders
+      description: List of placed orders
