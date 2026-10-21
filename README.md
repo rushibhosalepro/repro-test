@@ -13,3 +13,9 @@ Pages:
 - `/orders` your orders
 
 Coupon to try: `SAVE10` (10% off).
+
+## Coupons
+
+| Code | Discount |
+| --- | --- |
+| `SAVE10` | 10% off the subtotal |
