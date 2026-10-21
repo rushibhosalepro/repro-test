@@ -42,11 +42,24 @@ function locate(page, t) {
   return loc;
 }
 
-async function settle(page) {
-  await page.waitForLoadState("networkidle", { timeout: 3000 }).catch(() => {});
+const QUIET_MS = 500;
+const SETTLE_MAX_MS = 6000;
+
+/**
+ * Wait until the app has had no requests in flight for QUIET_MS (or SETTLE_MAX_MS passes).
+ * Playwright's "networkidle" load state only fires once per page load, so after a click it
+ * returns at once, before the requests the click triggers have even started.
+ */
+export async function settle(page, observed, now = () => Date.now(), sleep = (ms) => page.waitForTimeout(ms)) {
+  const deadline = now() + SETTLE_MAX_MS;
+  await sleep(50); // let handlers fired by the action start their requests
+  while (now() < deadline) {
+    if (observed.inflight === 0 && now() - observed.lastActivity >= QUIET_MS) return;
+    await sleep(50);
+  }
 }
 
-async function runStep(page, step, baseUrl) {
+async function runStep(page, step, baseUrl, observed) {
   const opts = { timeout: 5000 };
   switch (step.do) {
     case "goto":
@@ -75,11 +88,22 @@ async function runStep(page, step, baseUrl) {
       await page.waitForTimeout(Math.min(step.ms, 3000));
       break;
   }
-  await settle(page);
+  await settle(page, observed);
 }
 
 function instrument(page, origin) {
-  const observed = { requests: [], errors: [] };
+  const observed = { requests: [], errors: [], inflight: 0, lastActivity: Date.now() };
+  // Count every request the page makes (any origin) so settle() knows when it's quiet.
+  const done = () => {
+    observed.inflight = Math.max(0, observed.inflight - 1);
+    observed.lastActivity = Date.now();
+  };
+  page.on("request", () => {
+    observed.inflight++;
+    observed.lastActivity = Date.now();
+  });
+  page.on("requestfinished", done);
+  page.on("requestfailed", done);
   page.on("request", (r) => {
     const u = new URL(r.url());
     if (u.origin !== origin) return;
@@ -183,7 +207,7 @@ async function oneRun(browser, job, withSnapshot, runIndex) {
   try {
     for (let i = 0; i < job.plan.steps.length; i++) {
       try {
-        await runStep(page, job.plan.steps[i], job.baseUrl);
+        await runStep(page, job.plan.steps[i], job.baseUrl, observed);
       } catch (err) {
         Object.assign(result, { ok: false, failedStep: i, error: squash(err.message).slice(0, 300) });
         break;
@@ -195,6 +219,8 @@ async function oneRun(browser, job, withSnapshot, runIndex) {
       result.text = squash(await page.evaluate(() => document.body?.innerText ?? "").catch(() => "")).slice(0, 2500);
       result.elements = await describeElements(page);
     }
+    // Requests set off by the last step may still be on their way; the check must see them.
+    await settle(page, observed);
     if (result.ok && job.plan.check) {
       let verdict = evaluateOffline(job.plan.check, observed);
       if (!verdict) {
