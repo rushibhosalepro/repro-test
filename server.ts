@@ -1,5 +1,6 @@
 // ShopLite: a tiny online shop.
 // State is per browser session (cookie), so parallel visitors and replay runs don't collide.
+import { Sentry } from "./instrument.ts";
 import { pages } from "./pages.ts";
 
 interface Product {
@@ -110,7 +111,18 @@ async function handle(req: Request, s: Session): Promise<Response> {
 
 export async function fetchHandler(req: Request): Promise<Response> {
   const { id, session, isNew } = getSession(req);
-  const res = await handle(req, session);
+  let res: Response;
+  try {
+    res = await handle(req, session);
+  } catch (err) {
+    Sentry.withScope((scope) => {
+      const url = new URL(req.url);
+      scope.setTag("route", `${req.method} ${url.pathname}`);
+      scope.setContext("request", { method: req.method, url: req.url });
+      Sentry.captureException(err);
+    });
+    res = json({ error: "Something went wrong" }, 500);
+  }
   if (isNew) res.headers.append("set-cookie", `sid=${id}; Path=/; HttpOnly; SameSite=Lax`);
   return res;
 }
