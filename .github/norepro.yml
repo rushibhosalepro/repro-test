@@ -18,3 +18,8 @@ app:
 run:
   install: bun install
   env: []          # secret names the app needs, e.g. [GEMINI_API_KEY]
+
+# Production evidence: match issues to errors in this Sentry project.
+sentry:
+  org: self-mcf
+  project: shoplite
