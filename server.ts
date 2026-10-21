@@ -82,7 +82,7 @@ async function handle(req: Request, s: Session): Promise<Response> {
     const { qty } = (await req.json()) as { qty: number };
     s.cart = s.cart
       .map((l) => (l.productId === productId ? { ...l, qty: Math.max(0, Math.floor(qty)) } : l))
-      .filter((l) => l.qty > 0);
+      .filter((l) => l.qty >= 0); // keep lines visible while quantities change
     return json(totals(s));
   }
   if (route === "POST /api/coupon") {
