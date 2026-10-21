@@ -24,6 +24,7 @@ const PRODUCTS: Product[] = [
   { id: "cap", name: "Sun Cap", price: 300 },
   { id: "bottle", name: "Steel Water Bottle", price: 400 },
   { id: "glasses", name: "Sun Glasses", price: 900 },
+  { id: "hoodie", name: "Cotton Hoodie", price: 1200 },
 ];
 const COUPONS: Record<string, number> = { SAVE10: 0.1 };
 
