@@ -50,7 +50,12 @@ async function runStep(page, step, baseUrl) {
   const opts = { timeout: 5000 };
   switch (step.do) {
     case "goto":
-      await page.goto(new URL(step.path, baseUrl).toString(), { timeout: 15000 });
+    {
+      // Second line of defence: never leave the app's origin, whatever the plan says.
+      const url = new URL(step.path, baseUrl);
+      if (url.origin !== new URL(baseUrl).origin) throw new Error(`refusing to leave the app: ${url.origin}`);
+      await page.goto(url.toString(), { timeout: 15000 });
+    }
       break;
     case "click": {
       const loc = locate(page, step.target);
