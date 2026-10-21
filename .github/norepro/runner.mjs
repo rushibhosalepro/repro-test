@@ -2,9 +2,11 @@
 // their repo as .github/norepro/runner.mjs), never on No Repro's servers.
 //   node runner.mjs <job.json> <out.json>
 // job: { mode: "snapshot" | "replay", baseUrl, reset: "POST /__reset" | null, runs, plan: { viewport, steps, check } }
-// Replay: run the steps `runs` times in fresh browsers and evaluate the check each time. If a step
+// Replay: start the app, run the steps `runs` times in fresh browsers, evaluate the check each time. If a step
 // can't be performed, the page is described (elements, text) so No Repro can correct the plan.
 // Snapshot: run the steps once, then describe the page.
+// Bisect: for each commit git bisect picks, install + start the app there and replay the plan;
+// the bug showing marks it bad, not showing marks it good, build failures are skipped.
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 
 const CANDIDATES = 'a[href],button,input,select,textarea,[role=button],[role=link],[role=checkbox],[role=tab],[role=menuitem],[data-testid],[id]';
@@ -248,6 +250,141 @@ async function oneRun(browser, job, withSnapshot, runIndex) {
   return result;
 }
 
+// ---------- the app under test ----------
+// Install and start commands come from the repo owner's workflow (env), never from the plan.
+
+const APP = {
+  dir: process.env.NOREPRO_APP_DIR || process.cwd(),
+  install: process.env.NOREPRO_INSTALL || "",
+  start: process.env.NOREPRO_START || "",
+  readyUrl: process.env.NOREPRO_READY_URL || "",
+  log: process.env.NOREPRO_APP_LOG || "app.log",
+};
+
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function answers(url) {
+  try {
+    const res = await fetch(url, { redirect: "manual" });
+    return res.status < 500;
+  } catch {
+    return false;
+  }
+}
+
+/** Install and start the app at whatever commit is checked out. Returns a stop() or why it failed. */
+async function startApp(label) {
+  const { spawn, spawnSync } = await import("node:child_process");
+  const { openSync, appendFileSync } = await import("node:fs");
+  appendFileSync(APP.log, `\n===== ${label} =====\n`);
+  const fd = openSync(APP.log, "a");
+  if (APP.install) {
+    const res = spawnSync("bash", ["-lc", APP.install], { cwd: APP.dir, stdio: ["ignore", fd, fd], timeout: 10 * 60_000 });
+    if (res.status !== 0) return { ok: false, reason: "install failed" };
+  }
+  const child = spawn("bash", ["-lc", APP.start], { cwd: APP.dir, stdio: ["ignore", fd, fd], detached: true });
+  let exited = false;
+  child.on("exit", () => (exited = true));
+  const stop = async () => {
+    try {
+      process.kill(-child.pid, "SIGTERM"); // the whole process group: npm/bun spawn children
+    } catch {}
+    for (let i = 0; i < 20 && (await answers(APP.readyUrl)); i++) await wait(250);
+  };
+  for (let i = 0; i < 120; i++) {
+    if (await answers(APP.readyUrl)) return { ok: true, stop };
+    if (exited) return { ok: false, reason: "the app exited while starting" };
+    await wait(1000);
+  }
+  await stop();
+  return { ok: false, reason: "the app didn't answer within 2 minutes" };
+}
+
+async function replayAll(browser, job, runs) {
+  const out = [];
+  for (let i = 1; i <= runs; i++) {
+    await resetApp(job.baseUrl, job.reset);
+    const run = await oneRun(browser, job, false, i);
+    out.push(run);
+    // If the steps can't be followed, repeating them won't help; report what the page looked like.
+    if (!run.ok) break;
+  }
+  return out;
+}
+
+// ---------- bisect ----------
+
+/** Classify one commit's runs the way git bisect needs: the bug showed, it didn't, or we can't tell. */
+export function classify(runs) {
+  if (!runs.length || runs.some((r) => !r.ok)) return "skip";
+  return runs.some((r) => r.check && !r.check.passed) ? "bad" : "good";
+}
+
+/** "<sha> is the first bad commit" (newer git quotes it: "first 'bad' commit") → sha */
+export function firstBadFrom(output) {
+  return output.match(/^([0-9a-f]{40}) is the first '?bad'? commit/m)?.[1] ?? null;
+}
+
+async function bisect(browser, job) {
+  const { execFileSync } = await import("node:child_process");
+  const git = (...args) => execFileSync("git", args, { cwd: APP.dir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  const clean = () => {
+    git("reset", "--hard", "-q");
+    git("clean", "-fdq"); // keeps ignored folders like node_modules between commits
+  };
+  const info = (sha) => {
+    const [full, message, author, date] = git("show", "-s", "--format=%H%x1f%s%x1f%an%x1f%aI", sha).trim().split("\x1f");
+    return { sha: full, message, author, date };
+  };
+  const { good, bad, runsPerCommit = 2, maxSteps = 12 } = job.bisect;
+  const steps = [];
+
+  const test = async (sha, label) => {
+    clean();
+    git("checkout", "-q", sha);
+    const app = await startApp(`${label} ${sha.slice(0, 7)}`);
+    if (!app.ok) {
+      steps.push({ sha, result: "skip", why: app.reason });
+      return "skip";
+    }
+    try {
+      const result = classify(await replayAll(browser, job, runsPerCommit));
+      steps.push({ sha, result });
+      return result;
+    } finally {
+      await app.stop();
+    }
+  };
+
+  // Check the known-good end first: if the bug is already there, this isn't a regression in the range.
+  const goodResult = await test(good, "known good");
+  if (goodResult === "bad") return { status: "not-regression", good: info(good), bad: info(bad), steps };
+  if (goodResult === "skip") return { status: "inconclusive", reason: "the known-good commit couldn't be tested", good: info(good), bad: info(bad), steps };
+
+  clean();
+  git("bisect", "start", bad, good);
+  try {
+    let output = "";
+    for (let i = 0; i < maxSteps; i++) {
+      const sha = git("rev-parse", "HEAD").trim();
+      const result = await test(sha, "bisect");
+      clean();
+      git("checkout", "-q", sha); // test() may leave things dirty; bisect needs the commit it chose
+      output = git("bisect", result);
+      const found = firstBadFrom(output);
+      if (found) return { status: "found", good: info(good), bad: info(bad), firstBad: info(found), steps };
+      if (/only 'skip'ped commits left/.test(output)) break;
+    }
+    return { status: "inconclusive", reason: "too many commits couldn't be built or tested", good: info(good), bad: info(bad), steps };
+  } finally {
+    try {
+      git("bisect", "reset");
+    } catch {}
+  }
+}
+
+// ---------- main ----------
+
 async function main() {
   const [jobPath, outPath] = process.argv.slice(2);
   const job = JSON.parse(await readFile(jobPath, "utf8"));
@@ -255,17 +392,18 @@ async function main() {
   const browser = await chromium.launch();
   try {
     let out;
-    if (job.mode === "snapshot") {
-      await resetApp(job.baseUrl, job.reset);
-      out = await oneRun(browser, job, true, null);
+    if (job.mode === "bisect") {
+      out = { bisect: await bisect(browser, job) };
     } else {
-      out = { runs: [] };
-      for (let i = 1; i <= job.runs; i++) {
-        await resetApp(job.baseUrl, job.reset);
-        const run = await oneRun(browser, job, false, i);
-        out.runs.push(run);
-        // If the steps can't be followed, repeating them won't help; report what the page looked like.
-        if (!run.ok) break;
+      const app = APP.start ? await startApp("current") : { ok: true, stop: async () => {} };
+      if (!app.ok) {
+        out = { fatal: `The app didn't start: ${app.reason}.`, appStartFailed: true };
+      } else {
+        try {
+          out = job.mode === "snapshot" ? (await resetApp(job.baseUrl, job.reset), await oneRun(browser, job, true, null)) : { runs: await replayAll(browser, job, job.runs) };
+        } finally {
+          await app.stop();
+        }
       }
     }
     await writeFile(outPath, JSON.stringify(out));

@@ -1,6 +1,7 @@
 # Added by No Repro. Lets No Repro confirm reported bugs by replaying them in a browser
-# on this repo's own runner, with this repo's own secrets. No Repro starts this workflow
-# with a plan (browser steps + one check) and reads the uploaded result.
+# on this repo's own runner, with this repo's own secrets. No Repro starts this workflow with a
+# plan (browser steps + one check). The runner installs and starts the app (once, or once per
+# commit when finding the commit that introduced a bug with git bisect) and uploads the result.
 name: No Repro
 run-name: "No Repro · issue #${{ inputs.issue }} · ${{ inputs.ref }}"
 
@@ -27,32 +28,15 @@ concurrency:
 jobs:
   reproduce:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history, for git bisect
       - uses: actions/setup-node@v4
         with:
           node-version: 22
       - uses: oven-sh/setup-bun@v2
-
-      - name: Install app
-        run: bun install
-
-      - name: Start app
-        # Only the app gets these secrets; the browser runner below doesn't.
-        run: nohup bun run dev > "$RUNNER_TEMP/app.log" 2>&1 &
-        env:
-          PORT: "3000"
-
-      - name: Wait for app
-        run: |
-          for i in $(seq 1 60); do
-            curl -fsS -o /dev/null "http://localhost:3000/health" && exit 0
-            sleep 2
-          done
-          echo "The app didn't answer at http://localhost:3000/health within 2 minutes."
-          tail -n 50 "$RUNNER_TEMP/app.log"
-          exit 1
 
       - name: Set up browser
         run: |
@@ -68,13 +52,16 @@ jobs:
         env:
           # Passed through env, never pasted into the script, so the plan can't inject shell.
           JOB: ${{ inputs.job }}
+          NOREPRO_APP_DIR: ${{ github.workspace }}
+          NOREPRO_APP_LOG: ${{ runner.temp }}/norepro/app.log
+          NOREPRO_INSTALL: "bun install"
+          NOREPRO_START: "bun run dev"
+          NOREPRO_READY_URL: "http://localhost:3000/health"
+          PORT: "3000"
+          # What the app needs to start. The values stay in this repo's secrets.
         run: |
           echo "$JOB" | base64 -d > job.json
           node runner.mjs job.json result.json || true
-
-      - name: Keep app log
-        if: always()
-        run: tail -c 20000 "$RUNNER_TEMP/app.log" > "$RUNNER_TEMP/norepro/app.log" 2>/dev/null || true
 
       - uses: actions/upload-artifact@v4
         if: always()
